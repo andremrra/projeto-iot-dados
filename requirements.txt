@@ -1,0 +1,5 @@
+kafka-python
+faker
+pymongo
+minio
+python-dotenv
