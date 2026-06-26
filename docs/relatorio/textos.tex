@@ -1,0 +1,467 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Introdução}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+A digitalização acelerada da indústria manufatureira tem gerado volumes crescentes de dados
+provenientes de sensores distribuídos em equipamentos industriais. Esses dados, quando
+devidamente coletados, armazenados e analisados, permitem detectar falhas precocemente,
+otimizar a manutenção preditiva e aumentar a disponibilidade dos equipamentos
+\cite{lee2015cyber}.
+
+O presente trabalho descreve o desenvolvimento de uma plataforma completa de integração
+de dados IoT aplicada ao contexto de monitoramento industrial. A solução integra dados
+de múltiplas fontes heterogêneas — sensores em tempo real, sistemas ERP, APIs REST e
+cadastros NoSQL — e os processa em um \textit{data lakehouse} estruturado em três camadas:
+Bronze (dados brutos), Silver (dados limpos) e Gold (métricas agregadas)
+\cite{armbrust2021lakehouse}.
+
+A motivação central é demonstrar, na prática, os conceitos estudados na disciplina de
+Integração de Dados II: modelagem NoSQL, arquitetura lakehouse, pipelines batch e
+streaming, orquestração e governança de dados. O resultado é um sistema capaz de
+processar mais de 100 eventos por segundo provenientes de sensores distribuídos em
+três fábricas industriais, com detecção de anomalias em janelas de cinco minutos.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Fundamentação Teórica}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Arquitetura Medallion Lakehouse}
+
+A arquitetura \textit{Medallion} organiza os dados em camadas progressivas de qualidade,
+denominadas Bronze, Silver e Gold \cite{databricks2021medallion}. A camada Bronze armazena
+os dados brutos exatamente como chegaram da fonte, sem transformações, garantindo
+auditabilidade e a possibilidade de reprocessamento. A camada Silver aplica limpeza,
+normalização e deduplicação, produzindo dados confiáveis para análise. A camada Gold
+contém agregações e métricas de negócio prontas para consumo por ferramentas de
+visualização e modelos de machine learning.
+
+O conceito de \textit{lakehouse} unifica as vantagens dos \textit{data lakes} (baixo custo,
+escalabilidade, suporte a dados semi-estruturados) com as dos \textit{data warehouses}
+(suporte transacional, consultas SQL performáticas) \cite{armbrust2021lakehouse}.
+
+\subsection{Processamento de Streams com Apache Kafka e Spark}
+
+O Apache Kafka é uma plataforma distribuída de streaming de eventos que permite publicar,
+assinar, armazenar e processar fluxos de registros em tempo real \cite{kreps2011kafka}.
+Sua arquitetura de log imutável e particionamento por chave garante ordenação dentro de
+partições e suporte a reprocessamento.
+
+O Apache Spark Structured Streaming estende o modelo batch do Spark para processamento
+contínuo, tratando streams como tabelas sem limites (\textit{unbounded tables})
+\cite{zaharia2016apache}. O uso de \textit{watermarks} permite lidar com dados com
+atraso (\textit{late data}), descartando eventos fora da janela de tolerância definida.
+
+\subsection{Orquestração com Apache Airflow}
+
+O Apache Airflow é uma plataforma de orquestração de workflows que representa pipelines
+como grafos acíclicos direcionados (DAGs) \cite{airflow2024docs}. Cada nó do grafo é uma
+tarefa com operadores especializados (PythonOperator, BashOperator, SparkSubmitOperator),
+e as dependências entre tarefas definem a ordem de execução. O Airflow provê agendamento,
+monitoramento, reexecução automática em caso de falha e registro histórico de execuções.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Arquitetura da Plataforma}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+A plataforma é composta por cinco camadas funcionais, todas containerizadas com Docker
+Compose, conforme ilustrado na Figura~\ref{fig:arquitetura}.
+
+\begin{figure}[h]
+\centering
+\begin{verbatim}
+Sensores (Simulador Python)
+        |
+        v
+   Apache Kafka ─────────────────────────────────┐
+   tópico: iot-sensors                           | streaming
+        |                                        v
+        | consumer                    anomaly_detector.py
+        v                             (janelas 5 min)
+   MinIO / Bronze                            |
+   factory_id/year/month/day                 v
+        |                             MinIO / alerts/
+        | Airflow @daily
+        v
+   Spark: bronze_to_silver.py
+        |
+        v
+   MinIO / Silver (sensor_data/)
+        |
+        v
+   Spark: silver_to_gold.py
+        |
+        v
+   MinIO / Gold (Parquet)
+        |
+        v
+   PostgreSQL (gold_equipment_metrics)
+        |
+        v
+   Metabase (dashboards)
+
+PostgreSQL (ERP) ── Airflow @daily  ──> Bronze/erp/
+API Manutenção   ── Airflow @hourly ──> Bronze/maintenance/
+MongoDB          ── cadastro de equipamentos e sensores
+\end{verbatim}
+\caption{Arquitetura da plataforma IoT Industrial}
+\label{fig:arquitetura}
+\end{figure}
+
+\subsection{Camada de Fontes de Dados}
+
+Quatro fontes alimentam a plataforma:
+
+\begin{itemize}
+    \item \textbf{Sensores IoT}: simulador Python gera eventos JSON em tempo real para o
+    tópico Kafka \texttt{iot-sensors}, com 100 eventos/segundo e taxa de anomalia
+    configurável (padrão 5\%). Cada evento inclui tipo de medição (temperatura, umidade,
+    pressão, vibração, corrente), valor, unidade, qualidade e metadados do sensor.
+
+    \item \textbf{Sistema ERP (PostgreSQL)}: contém registros de manutenção e ordens
+    de trabalho dos equipamentos. A ingestão batch diária é orquestrada pelo Airflow.
+
+    \item \textbf{API de Manutenção (REST)}: fornece dados de ordens de manutenção
+    agendadas. A ingestão horária é realizada via PythonOperator no Airflow, com
+    fallback para geração de dados \textit{mock} caso a API esteja indisponível.
+
+    \item \textbf{Cadastro de Equipamentos (MongoDB)}: armazena 50 equipamentos
+    distribuídos em 3 fábricas (SP, RJ, MG), com sensores e ranges normais embutidos
+    no documento do equipamento, conforme decisão arquitetural ADR-001.
+\end{itemize}
+
+\subsection{Camada de Armazenamento — Medallion Lakehouse}
+
+Todo o armazenamento de dados utiliza o MinIO, sistema de armazenamento de objetos
+compatível com S3, estruturado em cinco buckets:
+
+\begin{itemize}
+    \item \textbf{bronze}: dados brutos em formato JSONL, particionados por
+    \texttt{factory\_id/year/month/day}. Acumula lotes de 1.000 eventos por fábrica,
+    além de subpastas \texttt{erp/} e \texttt{maintenance/} para dados de outras fontes.
+
+    \item \textbf{silver}: dados de sensores limpos, normalizados e deduplicados,
+    em formato JSONL no caminho \texttt{sensor\_data/}.
+
+    \item \textbf{gold}: métricas horárias por equipamento em formato Parquet,
+    particionadas por \texttt{year/month/factory\_id}, no caminho
+    \texttt{equipment\_metrics\_hourly/}.
+
+    \item \textbf{alerts}: alertas de anomalias gerados pelo pipeline de streaming,
+    particionados por \texttt{factory\_id}.
+
+    \item \textbf{checkpoints}: checkpoints do Spark Structured Streaming para
+    garantia de processamento exatamente-uma-vez (\textit{exactly-once}).
+\end{itemize}
+
+\subsection{Camada de Processamento}
+
+\textbf{Bronze → Silver} (\texttt{bronze\_to\_silver.py}): job Spark que lê todos os
+arquivos JSONL do bucket Bronze com schema explícito do sensor, filtra apenas eventos
+com \texttt{sensor\_id} não nulo (descartando dados de ERP e manutenção), aplica
+limpeza (trim, lowercase, conversão de timestamp), extrai campos de metadados e
+remove duplicatas por \texttt{event\_id}.
+
+\textbf{Silver → Gold} (\texttt{silver\_to\_gold.py}): job Spark que lê os dados da
+camada Silver e produz agregações horárias por equipamento e tipo de medição, calculando
+média, mínimo, máximo, desvio padrão, contagem de eventos, taxa de anomalia e
+\textit{criticality score} (combinação ponderada de taxa de anomalia e variabilidade).
+
+\textbf{Detecção de Anomalias} (\texttt{anomaly\_detector.py}): job Spark Structured
+Streaming que consome o tópico Kafka em tempo real, aplica janelas tumbantes de cinco
+minutos com \textit{watermark} de dez minutos para tolerância a dados atrasados, e
+classifica alertas em dois níveis: \textit{warning} (taxa de anomalia ≥ 10\%) e
+\textit{critical} (taxa ≥ 30\%).
+
+\subsection{Camada de Orquestração}
+
+O Apache Airflow 2.9.3 com LocalExecutor gerencia três DAGs:
+
+\begin{itemize}
+    \item \textbf{iot\_lakehouse\_pipeline} (@daily): executa sequencialmente
+    Bronze→Silver via BashOperator com \texttt{spark-submit}, seguido de Silver→Gold.
+    Configurado com 2 retentativas e intervalo de 5 minutos entre tentativas.
+
+    \item \textbf{erp\_batch\_ingestion} (@daily): extrai registros de eventos de
+    equipamentos do PostgreSQL via PythonOperator e grava em \texttt{bronze/erp/}.
+
+    \item \textbf{maintenance\_api\_ingestion} (@hourly): consome a API REST de
+    manutenção e grava em \texttt{bronze/maintenance/}.
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Implementação}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Stack Tecnológica}
+
+A Tabela~\ref{tab:stack} apresenta todas as tecnologias utilizadas e suas versões.
+
+\begin{table}[h]
+\centering
+\caption{Stack tecnológica da plataforma}
+\label{tab:stack}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Categoria} & \textbf{Tecnologia} & \textbf{Versão} \\
+\hline
+Containerização & Docker + Docker Compose & 24.x / 2.x \\
+\hline
+Streaming & Apache Kafka (Confluent) & 7.5.0 \\
+\hline
+Processamento & Apache Spark & 3.5.3 \\
+\hline
+Orquestração & Apache Airflow & 2.9.3 \\
+\hline
+Object Storage & MinIO & latest \\
+\hline
+NoSQL & MongoDB & 6.x \\
+\hline
+SQL & PostgreSQL & 15 \\
+\hline
+Visualização & Metabase & 0.49.0 \\
+\hline
+Linguagem & Python & 3.10+ \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Modelagem NoSQL — MongoDB}
+
+A decisão de modelagem mais relevante foi a desnormalização do cadastro de equipamentos:
+sensores e seus ranges de medição são embutidos diretamente no documento do equipamento,
+conforme ADR-001. Essa decisão elimina \textit{joins} no pipeline de streaming, que precisa
+consultar os ranges normais para detectar anomalias em tempo real. O custo é uma
+duplicação caso o mesmo sensor esteja em múltiplos equipamentos — cenário inexistente
+no domínio do projeto.
+
+Os índices criados incluem \texttt{factory\_id}, \texttt{type}, \texttt{status},
+\texttt{sensors.id}, \texttt{sensors.type} (em arrays) e o índice composto
+\texttt{\{factory\_id, status\}} para a consulta mais frequente no pipeline.
+
+\subsection{Particionamento dos Dados}
+
+A estratégia de particionamento foi otimizada para as queries downstream:
+
+\textbf{Bronze}: \texttt{factory\_id/year/month/day} — \texttt{factory\_id} como
+primeira dimensão permite que o Spark aplique \textit{partition pruning} ao processar
+uma fábrica específica, reduzindo I/O em aproximadamente 67\% para queries de fábrica
+única. Lotes de 1.000 eventos por fábrica evitam o problema de \textit{small files}.
+
+\textbf{Silver}: escrita flat em \texttt{sensor\_data/} com \texttt{coalesce(4)},
+otimizando para leitura completa pelo job Silver→Gold.
+
+\textbf{Gold}: \texttt{year/month/factory\_id} em formato Parquet, permitindo
+\textit{partition pruning} por fábrica e mês nas queries analíticas do Metabase.
+
+\subsection{Qualidade de Dados}
+
+Dez \textit{assertions} automatizadas foram implementadas com pytest, cobrindo:
+
+\begin{enumerate}
+    \item Presença de campos obrigatórios (\texttt{event\_id}, \texttt{sensor\_id}, etc.)
+    \item Validade do tipo de medição (enum com 5 valores)
+    \item Validade do campo \texttt{quality} (good/warning/bad)
+    \item \texttt{factory\_id} pertencente ao conjunto conhecido de fábricas
+    \item Valores dentro dos ranges físicos por tipo de sensor
+    \item Taxa de duplicatas abaixo de 1\% (Bronze é append-only)
+    \item \texttt{is\_anomaly} do tipo booleano
+    \item \texttt{value} do tipo numérico
+    \item \texttt{timestamp} não vazio
+    \item \texttt{event\_id} no formato UUID v4
+\end{enumerate}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Guia Operacional}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\subsection{Pré-requisitos}
+
+\begin{itemize}
+    \item Docker Desktop 24+ e Docker Compose 2.x instalados e em execução
+    \item Python 3.10+
+    \item Dependências: \texttt{pip install kafka-python pymongo boto3 psycopg2-binary requests pytest}
+\end{itemize}
+
+\subsection{Subindo o Ambiente}
+
+\begin{verbatim}
+# 1. Subir todos os containers
+docker-compose up -d
+
+# 2. Aguardar containers ficarem healthy (~3-5 minutos)
+docker-compose ps
+
+# 3. Criar banco de dados Airflow e Metabase (primeira execução)
+docker exec postgres psql -U user -d iot -c "CREATE DATABASE airflow;"
+docker exec postgres psql -U user -d iot -c "CREATE DATABASE metabase;"
+
+# 4. Popular MongoDB
+python src/ingestao/mongodb_setup.py
+
+# 5. Criar buckets no MinIO
+docker exec minio mc alias set local http://localhost:9000 admin password
+docker exec minio mc mb local/bronze local/silver local/gold \
+    local/alerts local/checkpoints
+\end{verbatim}
+
+\subsection{Credenciais de Acesso}
+
+A Tabela~\ref{tab:creds} lista as credenciais de acesso a todos os serviços da plataforma.
+
+\begin{table}[h]
+\centering
+\caption{Credenciais de acesso aos serviços}
+\label{tab:creds}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{Serviço} & \textbf{URL} & \textbf{Usuário} & \textbf{Senha} \\
+\hline
+MinIO Console & http://localhost:9001 & admin & password \\
+\hline
+Apache Airflow & http://localhost:8080 & admin & admin \\
+\hline
+Metabase & http://localhost:3030 & (primeiro acesso) & (primeiro acesso) \\
+\hline
+Spark Master UI & http://localhost:8081 & — & — \\
+\hline
+PostgreSQL & localhost:5432 & user & password \\
+\hline
+MongoDB & localhost:27017 & — & — \\
+\hline
+Kafka & localhost:9092 & — & — \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Executando o Pipeline Completo}
+
+\begin{verbatim}
+# Terminal 1 — Geração de dados de sensores
+python src/ingestao/sensor_simulator.py --duration 120
+
+# Terminal 2 — Consumer Kafka → Bronze
+python src/streaming/kafka_to_bronze.py
+
+# Após gerar dados suficientes, executar via Airflow:
+# http://localhost:8080 → iot_lakehouse_pipeline → Trigger DAG
+
+# Ou executar manualmente:
+docker exec spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --conf spark.jars.ivy=/tmp/ivy2 \
+  --packages org.apache.hadoop:hadoop-aws:3.3.4,\
+com.amazonaws:aws-java-sdk-bundle:1.12.262 \
+  /opt/spark/jobs/bronze_to_silver.py
+
+docker exec spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --conf spark.jars.ivy=/tmp/ivy2 \
+  --packages org.apache.hadoop:hadoop-aws:3.3.4,\
+com.amazonaws:aws-java-sdk-bundle:1.12.262 \
+  /opt/spark/jobs/silver_to_gold.py
+\end{verbatim}
+
+\subsection{Detecção de Anomalias em Streaming}
+
+\begin{verbatim}
+docker exec spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --conf spark.jars.ivy=/tmp/ivy2 \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,\
+org.apache.hadoop:hadoop-aws:3.3.4,\
+com.amazonaws:aws-java-sdk-bundle:1.12.262 \
+  /opt/spark/jobs/anomaly_detector.py
+\end{verbatim}
+
+\subsection{Testes de Qualidade}
+
+\begin{verbatim}
+pip install pytest
+pytest tests/ -v
+# Esperado: 10 testes passando
+\end{verbatim}
+
+\subsection{Exportando Gold para o Metabase}
+
+\begin{verbatim}
+docker exec spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --conf spark.jars.ivy=/tmp/ivy2 \
+  --packages org.apache.hadoop:hadoop-aws:3.3.4,\
+com.amazonaws:aws-java-sdk-bundle:1.12.262,\
+org.postgresql:postgresql:42.6.0 \
+  /opt/spark/jobs/gold_to_postgres.py
+\end{verbatim}
+
+Após a exportação, acessar o Metabase em \url{http://localhost:3030}, sincronizar
+o schema do banco \texttt{iot} e a tabela \texttt{gold\_equipment\_metrics} estará
+disponível para criação de dashboards.
+
+\subsection{Parando o Ambiente}
+
+\begin{verbatim}
+# Para mas mantém dados (volumes preservados)
+docker-compose down
+
+# Para e remove todos os dados
+docker-compose down -v
+\end{verbatim}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Resultados}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+A plataforma foi implementada com sucesso, atendendo a todos os requisitos das
+Entregas 1, 2 e 3 do projeto integrador. Os principais resultados obtidos foram:
+
+\begin{itemize}
+    \item \textbf{Ingestão}: o simulador de sensores gerou e publicou eventos no Kafka
+    a uma taxa média de 100 eventos/segundo, distribuídos entre 50 equipamentos de
+    3 fábricas. O consumer Kafka gravou lotes de 1.000 eventos por fábrica no bucket
+    Bronze do MinIO, totalizando aproximadamente 180.000 eventos em uma execução de
+    30 minutos.
+
+    \item \textbf{Processamento Batch}: os jobs Spark Bronze→Silver e Silver→Gold
+    executaram com sucesso via Airflow e de forma manual, processando o volume de dados
+    acumulado em menos de 2 minutos cada. A camada Gold produz métricas horárias
+    com \textit{criticality score} para cada combinação de equipamento e tipo de medição.
+
+    \item \textbf{Múltiplas Fontes}: além dos sensores, a plataforma integrou com
+    sucesso dados do ERP PostgreSQL (190 registros de eventos de equipamentos) e
+    da API REST de manutenção (dados \textit{mock} com 10--30 registros/hora).
+
+    \item \textbf{Qualidade}: todos os 10 testes automatizados passaram na camada
+    Bronze, validando schema, tipos, ranges físicos e integridade referencial dos dados.
+
+    \item \textbf{Visualização}: dados do Gold foram exportados para o PostgreSQL
+    e visualizados no Metabase com dashboards de métricas por fábrica, tipo de evento
+    e evolução temporal.
+\end{itemize}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Conclusão}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Este trabalho demonstrou a viabilidade de construir uma plataforma completa de
+integração de dados IoT industrial utilizando ferramentas open-source amplamente
+adotadas pela indústria. A arquitetura Medallion Lakehouse provou-se adequada para
+o domínio, separando claramente responsabilidades entre camadas e permitindo reprocessamento
+de dados históricos sem perda dos dados brutos.
+
+Os principais desafios enfrentados foram a integração do Spark com o MinIO via protocolo
+S3A dentro de containers Docker (exigindo configurações específicas de endpoint e
+\textit{path style access}), e a gestão de múltiplos schemas heterogêneos no mesmo
+bucket Bronze — resolvida com leitura por schema explícito e filtragem por \texttt{sensor\_id}.
+
+Como trabalhos futuros, destacam-se: (i) adoção de formatos de tabela como Apache Iceberg
+para suporte transacional ACID no lakehouse; (ii) implementação de CDC (\textit{Change
+Data Capture}) no PostgreSQL ERP para ingestão incremental; e (iii) desenvolvimento de
+modelos preditivos de manutenção utilizando as métricas da camada Gold.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{Agradecimentos}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+Os autores agradecem ao corpo docente do curso de Ciência de Dados e Inteligência
+Artificial da PUC Minas pelo suporte e orientação durante o desenvolvimento deste
+projeto.

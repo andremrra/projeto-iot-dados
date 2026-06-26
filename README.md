@@ -1,136 +1,173 @@
 # Plataforma IoT Industrial — Integração de Dados
 
-Plataforma de integração de dados para monitoramento industrial. Ingere leituras de sensores em tempo real via Apache Kafka, armazena dados brutos no MinIO (camada Bronze do lakehouse), e mantém o cadastro de equipamentos e fábricas no MongoDB.
+Plataforma completa de integração de dados para monitoramento industrial. Ingere leituras de sensores em tempo real via Apache Kafka, processa dados via Apache Spark (batch e streaming), orquestra pipelines com Apache Airflow e disponibiliza métricas via Metabase.
 
 ## Arquitetura
 
 ```
-Sensores (simulador)
+Sensores (simulador Python)
         │
         ▼
-   Apache Kafka  ──────────────────────────────────────────┐
-        │                                                   │
-        ▼                                                   ▼
-  kafka_to_bronze.py                               MongoDB (equipamentos)
-  (consumer Kafka)                                  cadastro + ranges dos sensores
+   Apache Kafka ─────────────────────────────────────────┐
+   tópico: iot-sensors                                   │ streaming
+        │ consumer (kafka_to_bronze.py)                  ▼
+        ▼                                     anomaly_detector.py
+   MinIO / Bronze                             (janelas 5 min)
+   factory_id / year / month / day                  │
+        │                                           ▼
+        │ Airflow @daily                    MinIO / alerts/
+        ▼
+   Spark: bronze_to_silver.py
         │
         ▼
-   MinIO / Bronze
-   data/bronze/year=.../month=.../day=.../
+   MinIO / Silver (year / month / factory_id)
+        │
+        ▼
+   Spark: silver_to_gold.py
+        │
+        ▼
+   MinIO / Gold — Parquet (year / month / factory_id)
+        │
+        ▼
+   Metabase (dashboards)
+
+PostgreSQL (ERP) ──── Airflow @daily ──► MinIO / Bronze / erp/
+API Manutenção   ──── Airflow @hourly ──► MinIO / Bronze / maintenance/
+MongoDB ──────── cadastro de equipamentos e ranges de sensores
 ```
+
+## Stack
+
+| Tecnologia | Versão | Papel |
+|---|---|---|
+| Apache Kafka | 7.5.0 (Confluent) | Streaming de eventos IoT |
+| Apache Spark | 3.5 | Processamento batch e streaming |
+| Apache Airflow | 2.9.3 | Orquestração de pipelines |
+| MinIO | latest | Object storage (lakehouse Bronze/Silver/Gold) |
+| MongoDB | 6 | Cadastro de equipamentos e sensores |
+| PostgreSQL | 15 | ERP + metadados Airflow/Metabase |
+| Metabase | 0.49 | Dashboards analíticos |
 
 ## Pré-requisitos
 
-- Docker e Docker Compose instalados
-- Python 3.10+ (para rodar o simulador e o setup do MongoDB localmente)
-- Dependências Python: `pip install kafka-python pymongo`
+- Docker 24+ e Docker Compose 2.x
+- Python 3.10+
+- Dependências: `pip install kafka-python pymongo boto3 psycopg2-binary requests pytest`
 
-## Subindo o ambiente
+## Subindo o Ambiente
 
 ```bash
 docker-compose up -d
 ```
 
-Isso sobe em ordem: Zookeeper → Kafka → MongoDB → PostgreSQL → MinIO.
-
-Todos os serviços têm health checks configurados. Aguarde todos aparecerem como `healthy` antes de prosseguir:
-
+Aguardar todos os containers ficarem `healthy` (~3-5 minutos):
 ```bash
 docker-compose ps
 ```
 
-## Populando o MongoDB
+## Setup Inicial
 
-Após os containers estarem saudáveis, rode o script de setup:
-
+### 1. Popular MongoDB
 ```bash
 python src/ingestao/mongodb_setup.py
 ```
 
-Isso cria as coleções `fabricas` e `equipamentos` com validação de schema, índices e seed de 50 equipamentos distribuídos entre as 3 fábricas.
-
-Opções disponíveis:
-
+### 2. Criar buckets no MinIO
 ```bash
-# Conectar em URI diferente
-python src/ingestao/mongodb_setup.py --uri mongodb://localhost:27017
-
-# Mudar quantidade de equipamentos no seed
-python src/ingestao/mongodb_setup.py --equipments 100
-
-# Resetar tudo (apaga e recria)
-python src/ingestao/mongodb_setup.py --drop
+docker exec minio mc alias set local http://localhost:9000 admin password
+docker exec minio mc mb local/bronze local/silver local/gold local/alerts local/checkpoints
 ```
 
-## Gerando eventos de sensores
+## Executando o Pipeline
 
-Em um terminal separado, rode o simulador:
-
+### Streaming: Kafka → Bronze
 ```bash
+# Terminal 1: simulador de sensores
 python src/ingestao/sensor_simulator.py
-```
 
-Por padrão gera 100 eventos/segundo para o tópico `iot-sensors` no Kafka local.
-
-Opções:
-
-```bash
-# Ver eventos sem enviar para o Kafka
-python src/ingestao/sensor_simulator.py --dry-run
-
-# Configurar taxa e duração
-python src/ingestao/sensor_simulator.py --events-per-second 200 --duration 60
-
-# Aumentar taxa de anomalias (padrão: 5%)
-python src/ingestao/sensor_simulator.py --anomaly-rate 0.15
-```
-
-## Consumindo eventos e gravando no Bronze
-
-Em outro terminal:
-
-```bash
+# Terminal 2: consumer Kafka → MinIO Bronze
 python src/streaming/kafka_to_bronze.py
 ```
 
-Os eventos são gravados particionados por data em `data/bronze/year=.../month=.../day=.../events.json`.
+### Batch: Bronze → Silver → Gold
+Via Airflow em http://localhost:8080 (admin/admin) — acione a DAG `iot_lakehouse_pipeline`.
 
-## Serviços e portas
+Ou localmente:
+```bash
+MINIO_ENDPOINT=http://localhost:9000 python src/processamento/bronze_to_silver.py
+MINIO_ENDPOINT=http://localhost:9000 python src/processamento/silver_to_gold.py
+```
+
+### Streaming de Anomalias
+```bash
+docker exec spark-master spark-submit \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
+  /opt/bitnami/spark/jobs/anomaly_detector.py
+```
+
+## Testes de Qualidade
+
+```bash
+pytest tests/ -v
+```
+
+## Serviços e Portas
 
 | Serviço | Porta | Acesso |
 |---|---|---|
-| Kafka | 9092 | `localhost:9092` |
-| MongoDB | 27017 | `mongodb://localhost:27017` |
-| PostgreSQL | 5432 | `localhost:5432` (user/password, db: iot) |
+| Kafka | 9092 (ext) | localhost:9092 |
+| MongoDB | 27017 | mongodb://localhost:27017 |
+| PostgreSQL | 5432 | localhost:5432 (user/password, db: iot) |
+| MinIO API | 9000 | http://localhost:9000 |
 | MinIO Console | 9001 | http://localhost:9001 (admin/password) |
-| MinIO API | 9000 | `http://localhost:9000` |
+| Spark Master UI | 8081 | http://localhost:8081 |
+| Airflow | 8080 | http://localhost:8080 (admin/admin) |
+| Metabase | 3000 | http://localhost:3000 |
 
-## Estrutura do repositório
+## Estrutura do Repositório
 
 ```
 projeto-iot-dados/
 ├── README.md
 ├── docker-compose.yml
+├── docker/
+│   └── init-postgres.sql       # Cria databases airflow e metabase
 ├── docs/
-│   └── modelo-dados.md        # Modelagem NoSQL + ADR de decisões arquiteturais
+│   ├── arquitetura.md          # ADRs e decisões técnicas
+│   ├── modelo-dados.md         # Modelagem NoSQL MongoDB
+│   ├── catalogo-dados.md       # Catálogo de schemas e linhagem
+│   └── runbook.md              # Guia operacional
 ├── src/
 │   ├── ingestao/
-│   │   ├── sensor_simulator.py  # Gera eventos de sensores → Kafka
-│   │   └── mongodb_setup.py     # Cria coleções, índices e seed no MongoDB
+│   │   ├── sensor_simulator.py         # Gera eventos → Kafka
+│   │   ├── mongodb_setup.py            # Setup MongoDB
+│   │   ├── erp_ingestion.py            # Ingestão batch ERP
+│   │   └── maintenance_api_ingestion.py # Ingestão API REST
+│   ├── processamento/
+│   │   ├── bronze_to_silver.py         # Spark: Bronze → Silver
+│   │   ├── silver_to_gold.py           # Spark: Silver → Gold
+│   │   ├── bronze_silver.ipynb         # Notebook exploratório
+│   │   └── silver_to_gold.ipynb        # Notebook exploratório
+│   ├── dags/
+│   │   ├── dag_pipeline.py             # Airflow: pipeline diário
+│   │   ├── dag_erp_ingestion.py        # Airflow: ERP @daily
+│   │   └── dag_maintenance_api.py      # Airflow: API @hourly
 │   └── streaming/
-│       └── kafka_to_bronze.py   # Consome Kafka e grava na camada Bronze
-└── data/
-    └── bronze/                  # Dados brutos particionados por data
+│       ├── kafka_to_bronze.py          # Consumer Kafka → Bronze
+│       └── anomaly_detector.py         # Spark Streaming + alertas
+├── data/
+│   ├── sample/
+│   │   └── events_bronze_sample.json   # Dados de exemplo para testes
+│   └── schemas/
+│       ├── sensor_event.json           # JSON Schema do evento de sensor
+│       └── equipment.json              # JSON Schema do equipamento
+└── tests/
+    └── test_data_quality.py            # 10 assertions de qualidade
 ```
 
-## Parando o ambiente
+## Documentação
 
-```bash
-docker-compose down
-```
-
-Para remover também os volumes (apaga todos os dados):
-
-```bash
-docker-compose down -v
-```
+- [Arquitetura e ADRs](docs/arquitetura.md)
+- [Modelagem de Dados](docs/modelo-dados.md)
+- [Catálogo de Dados](docs/catalogo-dados.md)
+- [Runbook Operacional](docs/runbook.md)

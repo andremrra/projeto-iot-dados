@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Equipment",
+  "description": "Cadastro de equipamento industrial com sensores embarcados",
+  "type": "object",
+  "required": ["_id","name","type","factory_id","status"],
+  "properties": {
+    "_id":        { "type": "string" },
+    "name":       { "type": "string" },
+    "type":       { "type": "string", "enum": ["compressor","pump","motor","conveyor","turbine"] },
+    "factory_id": { "type": "string" },
+    "status":     { "type": "string", "enum": ["active","inactive","maintenance"] },
+    "sensors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id","type"],
+        "properties": {
+          "id":   { "type": "string" },
+          "type": { "type": "string" },
+          "unit": { "type": "string" },
+          "range": {
+            "type": "object",
+            "properties": {
+              "min": { "type": "number" },
+              "max": { "type": "number" }
+            }
+          },
+          "normal_range": {
+            "type": "object",
+            "properties": {
+              "min": { "type": "number" },
+              "max": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "maintenance": {
+      "type": "object",
+      "properties": {
+        "schedule":         { "type": "string" },
+        "last_maintenance": { "type": "string", "format": "date" },
+        "next_maintenance": { "type": "string", "format": "date" }
+      }
+    },
+    "installed_at": { "type": "string", "format": "date" }
+  }
+}

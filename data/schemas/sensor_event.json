@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SensorEvent",
+  "description": "Evento de leitura de sensor IoT industrial",
+  "type": "object",
+  "required": ["event_id","sensor_id","equipment_id","factory_id","measurement_type","value","unit","timestamp","quality","is_anomaly"],
+  "properties": {
+    "event_id":          { "type": "string", "format": "uuid" },
+    "sensor_id":         { "type": "string" },
+    "equipment_id":      { "type": "string" },
+    "factory_id":        { "type": "string" },
+    "measurement_type":  { "type": "string", "enum": ["temperature","humidity","pressure","vibration","current"] },
+    "value":             { "type": "number" },
+    "unit":              { "type": "string" },
+    "timestamp":         { "type": "string", "format": "date-time" },
+    "quality":           { "type": "string", "enum": ["good","warning","bad"] },
+    "is_anomaly":        { "type": "boolean" },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "firmware_version": { "type": "string" },
+        "battery_level":    { "type": "integer", "minimum": 0, "maximum": 100 },
+        "signal_strength":  { "type": "integer" }
+      }
+    }
+  }
+}

@@ -1,0 +1,114 @@
+\documentclass[a4paper,12pt,Times]{article}
+\usepackage{abakos}  %pacote com padrão da Abakos baseado no padrão da PUC
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%Capa da revista
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\newcommand{\monog}{Revista Abakós do Instituto de Ciências Exatas e de Informática Pontifícia Universidade Católica de Minas Gerais}
+\newcommand{\monogES}{Plataforma de Integração de Dados IoT: Uma Abordagem Lakehouse com Processamento Batch e Streaming}
+\newcommand{\tipo}{Artigo }
+\newcommand{\origem}{Brasil}
+\newcommand{\editorial}{\textbf{Abakos}, Belo Horizonte, v. 1, n. 1, p. 00-00, 2026 - ISSN: 2175-5841}
+
+%%%%%%%%%%%%%%%%%INFORMAÇÕES SOBRE AUTORES %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newcommand{\AutorA}{André Luiz Santos Moreira da Silva}
+\newcommand{\funcaoA}{}
+\newcommand{\emailA}{andre.luiz@onfly.com.br}
+\newcommand{\cursA}{Graduando em Ciência de Dados e IA, PUC Minas}
+
+\newcommand{\AutorB}{Daniel Rocha França}
+\newcommand{\funcaoB}{}
+\newcommand{\emailB}{daniel.rocha@gmail.com}
+\newcommand{\cursB}{Graduando em Ciência de Dados e IA, PUC Minas}
+
+\newcommand{\AutorC}{Ligia Ferreira Carvalho}
+\newcommand{\funcaoC}{}
+\newcommand{\emailC}{ligia.ferreira@gmail.com}
+\newcommand{\cursC}{Graduando em Ciência de Dados e IA, PUC Minas}
+
+\newcommand{\univ}{Pontifícia Universidade Católica de Minas Gerais}
+
+\newcommand{\keyword}[1]{\textsf{#1}}
+
+\begin{document}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Pagina de titulo
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{flushleft}
+
+\begin{minipage}[c][5cm][b]{16.5cm}
+\includegraphics[scale=2.8]{figuras/pucmg.png}
+\end{minipage}
+
+\vspace{0cm} {
+  \singlespacing \Large{\monog \symbolfootnote[1]{Trabalho apresentado à disciplina de Integração de Dados II -- 2025/1.} \\ }
+  \normalsize{\monogES}
+}
+\end{flushleft}
+
+\begin{flushright}
+\singlespacing
+\normalsize{\AutorA \footnote{\funcaoA \cursA, \origem\ -- \emailA }} \\
+\normalsize{\AutorB \footnote{\funcaoB \cursB, \origem\ -- \emailB }} \\
+\normalsize{\AutorC \footnote{\funcaoC \cursC, \origem\ -- \emailC }} \\
+\end{flushright}
+\thispagestyle{empty}
+
+\begin{abstract}
+\noindent
+Este trabalho apresenta o desenvolvimento de uma plataforma completa de integração de dados
+para monitoramento industrial baseada em Internet das Coisas (IoT). A solução implementa
+a arquitetura \textit{Medallion Lakehouse} com três camadas de dados (Bronze, Silver e Gold)
+armazenadas no MinIO, um sistema de armazenamento de objetos compatível com S3. A ingestão
+de dados em tempo real é realizada via Apache Kafka, o processamento batch utiliza Apache Spark,
+a orquestração de pipelines é feita pelo Apache Airflow e a detecção de anomalias em
+\textit{streaming} emprega o Spark Structured Streaming com janelas temporais de cinco minutos.
+Adicionalmente, integra-se a fontes heterogêneas como sistemas ERP (PostgreSQL),
+APIs REST de manutenção e cadastro de equipamentos no MongoDB. Os resultados demonstram
+um pipeline funcional capaz de processar mais de 100 eventos por segundo, com latência
+de alerta inferior a dois minutos.
+\\\textbf{\keyword{Palavras-chave: }} IoT. Data Lakehouse. Apache Kafka. Apache Spark. Airflow. Integração de Dados.
+\end{abstract}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newpage
+\selectlanguage{english}
+\begin{abstract}
+\noindent
+This work presents the development of a complete data integration platform for industrial
+monitoring based on the Internet of Things (IoT). The solution implements the Medallion
+Lakehouse architecture with three data layers (Bronze, Silver, and Gold) stored in MinIO,
+an S3-compatible object storage system. Real-time data ingestion is performed via Apache Kafka,
+batch processing uses Apache Spark, pipeline orchestration is handled by Apache Airflow,
+and streaming anomaly detection employs Spark Structured Streaming with five-minute time
+windows. Additionally, it integrates heterogeneous sources such as ERP systems (PostgreSQL),
+REST maintenance APIs, and equipment registration in MongoDB. Results demonstrate a
+functional pipeline capable of processing over 100 events per second, with alert
+latency under two minutes.
+\\\textbf{\keyword{Keywords: }} IoT. Data Lakehouse. Apache Kafka. Apache Spark. Airflow. Data Integration.
+\end{abstract}
+
+\selectlanguage{brazilian}
+\onehalfspace
+\setlength{\parindent}{1.25cm}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% INICIO DO TEXTO
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\include{textos}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% FIM DO TEXTO
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\newpage
+\singlespace{
+  \bibliographystyle{abntex2-alf}
+  \bibliography{bibliografia}
+}
+
+\end{document}
